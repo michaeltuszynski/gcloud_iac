@@ -212,23 +212,21 @@ resource "google_firestore_document" "mydoc" {
   project     = var.project_id
   collection  = var.collection_name
   document_id = random_string.document_id.result
-  //fields      = "{\"todo\":{\"mapValue\":{\"fields\":{\"title\":{\"stringValue\":\"This is a task\"},\"completed\":{\"booleanValue\":false}}}}}"
   fields      = "{\"title\":{\"stringValue\":\"This is another task\"},\"completed\":{\"booleanValue\":true}}"
 }
 
 
-# resource "null_resource" "destroy_database" {
-#   triggers = {
-#     resource_name = "${var.prefix}-${random_pet.project_id.id}"
-#     project_name  = var.project_name
-#     region        = var.region
-#   }
+resource "null_resource" "destroy_database" {
+  triggers = {
+    resource_name = "(default)"
+    project_name  = var.project_name
+  }
 
-#   provisioner "local-exec" {
-#     when    = destroy
-#     command = "gcloud alpha firestore databases delete --database=${self.triggers.resource_name} --project=${self.triggers.project_name} --quiet"
-#   }
-# }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "gcloud alpha firestore databases delete --database=${self.triggers.resource_name} --project=${self.triggers.project_name} --quiet"
+  }
+}
 
 resource "time_sleep" "wait_3_mins" {
   depends_on = [google_artifact_registry_repository.backend, data.http.dispatch_event_backend]
