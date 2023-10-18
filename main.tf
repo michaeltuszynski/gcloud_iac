@@ -18,8 +18,11 @@ resource "google_project_service" "services" {
     "container.googleapis.com",
     "firestore.googleapis.com",
     "iam.googleapis.com",
-    "appengine.googleapis.com"
+    "appengine.googleapis.com",
+    "cloudfunctions.googleapis.com",
+    "cloudbuild.googleapis.com",
   ])
+
   service            = each.key
   disable_on_destroy = false
 }
@@ -38,7 +41,6 @@ resource "google_service_account" "admin_sa" {
 
 resource "google_service_account_key" "admin_sa_key" {
   service_account_id = google_service_account.admin_sa.name
-  #public_key_type    = "TYPE_X509_PEM_FILE"
 }
 
 resource "google_artifact_registry_repository" "backend" {
@@ -138,11 +140,6 @@ resource "github_repository_file" "backend_workflow" {
                 push: true
                 tags: ${var.region}-docker.pkg.dev/${var.project_name}/${var.repository_name_backend}/${var.repository_name_backend}:latest
 
-            - name: Deploy to Cloud Run
-              uses: 'google-github-actions/deploy-cloudrun@v1'
-              with:
-                service: "${var.prefix}-api"
-                image: ${var.region}-docker.pkg.dev/${var.project_name}/${var.repository_name_backend}/${var.repository_name_backend}:latest
     EOF
 }
 
@@ -163,31 +160,31 @@ data "http" "dispatch_event_backend" {
   depends_on = [github_repository_file.backend_workflow]
 }
 
-// Create a VPC
-resource "google_compute_network" "vpc" {
-  project                 = var.project_name
-  name                    = "my-vpc"
-  auto_create_subnetworks = false
-}
+# // Create a VPC
+# resource "google_compute_network" "vpc" {
+#   project                 = var.project_name
+#   name                    = "my-vpc"
+#   auto_create_subnetworks = false
+# }
 
-// Create a public subnet
-resource "google_compute_subnetwork" "public_subnet" {
-  project       = var.project_name
-  name          = "public-subnet"
-  ip_cidr_range = "10.0.1.0/24"
-  region        = var.region
-  network       = google_compute_network.vpc.name
-}
+# // Create a public subnet
+# resource "google_compute_subnetwork" "public_subnet" {
+#   project       = var.project_name
+#   name          = "public-subnet"
+#   ip_cidr_range = "10.0.1.0/24"
+#   region        = var.region
+#   network       = google_compute_network.vpc.name
+# }
 
-// Create a private subnet
-resource "google_compute_subnetwork" "private_subnet" {
-  project                  = var.project_name
-  name                     = "private-subnet"
-  ip_cidr_range            = "10.0.2.0/24"
-  region                   = var.region
-  network                  = google_compute_network.vpc.name
-  private_ip_google_access = true
-}
+# // Create a private subnet
+# resource "google_compute_subnetwork" "private_subnet" {
+#   project                  = var.project_name
+#   name                     = "private-subnet"
+#   ip_cidr_range            = "10.0.2.0/24"
+#   region                   = var.region
+#   network                  = google_compute_network.vpc.name
+#   private_ip_google_access = true
+# }
 
 resource "google_secret_manager_secret" "this" {
   project   = var.project_name
@@ -224,36 +221,129 @@ resource "random_string" "document_id" {
 
 resource "google_firestore_database" "database" {
   project     = var.project_name
-  name        = "(default)"
+  name        = "${random_pet.project_id.id}-db"
   location_id = "nam5"
   type        = "FIRESTORE_NATIVE"
 }
 
-resource "google_firestore_document" "mydoc" {
-  depends_on  = [google_firestore_database.database]
-  project     = var.project_id
-  collection  = var.collection_name
-  document_id = random_string.document_id.result
-  fields      = "{\"title\":{\"stringValue\":\"This is another task\"},\"completed\":{\"booleanValue\":true}}"
+# resource "google_firestore_document" "mydoc" {
+#   depends_on  = [google_firestore_database.database]
+#   database    = google_firestore_database.database.name
+#   project     = var.project_id
+#   collection  = var.collection_name
+#   document_id = random_string.document_id.result
+#   fields      = "{\"title\":{\"stringValue\":\"This is another task\"},\"completed\":{\"booleanValue\":true}}"
+# }
+
+resource "google_cloudfunctions_function" "insert_firestore_doc" {
+  name                  = "insert-firestore-doc"
+  description           = "Inserts a default document into Firestore"
+  available_memory_mb   = 128
+  source_archive_bucket = google_storage_bucket.bucket.name
+  source_archive_object = google_storage_bucket_object.archive.name
+  trigger_http          = true
+  runtime               = "python310"
+  entry_point           = "main"
+  project               = var.project_name
+  service_account_email = google_service_account.admin_sa.email
+
+  environment_variables = {
+    PROJECT_ID      = var.project_id
+    COLLECTION_NAME = var.collection_name
+    DATABASE_NAME   = google_firestore_database.database.name,
+    SECRET_NAME     = google_secret_manager_secret.this.secret_id,
+  }
+}
+
+resource "google_project_iam_member" "function_invoker" {
+  project = var.project_name
+  role    = "roles/cloudfunctions.invoker"
+  member  = "serviceAccount:${google_service_account.admin_sa.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "function_secret_access" {
+  project   = var.project_name
+  secret_id = google_secret_manager_secret.this.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.admin_sa.email}"
+}
+
+resource "google_project_iam_binding" "cloud_function_firestore_writer" {
+  project   = var.project_name
+  role = "roles/datastore.user"
+  members = [
+    "serviceAccount:${google_service_account.admin_sa.email}"
+  ]
+}
+
+
+resource "google_storage_bucket" "bucket" {
+  name          = "${var.prefix}-cloud-function-bucket"
+  location      = "US"
+  force_destroy = true
+  project       = var.project_name
+}
+
+variable "gcf_insert_firestore_doc_zip" {
+  type    = string
+  default = "./scripts/insert-firestore-doc/index.zip"
+}
+
+resource "null_resource" "delete_old_archive_firestore_doc" {
+  provisioner "local-exec" {
+    command = "rm -f ${var.gcf_insert_firestore_doc_zip}"
+  }
+  triggers = {
+    always_recreate = "${timestamp()}" # Ensure it runs every time
+  }
+}
+
+data "archive_file" "gcf_insert_firestore_doc" {
+  depends_on  = [null_resource.delete_old_archive_firestore_doc]
+  type        = "zip"
+  source_dir  = "./scripts/insert-firestore-doc"
+  output_path = var.gcf_insert_firestore_doc_zip
+}
+
+resource "google_storage_bucket_object" "archive" {
+  depends_on = [data.archive_file.gcf_insert_firestore_doc]
+  name       = "insert-firestore-doc.zip"
+  bucket     = google_storage_bucket.bucket.name
+  source     = data.archive_file.gcf_insert_firestore_doc.output_path
+}
+
+resource "null_resource" "invoke_function" {
+  depends_on = [
+    google_cloudfunctions_function.insert_firestore_doc,
+    google_firestore_database.database,
+    google_secret_manager_secret.this
+  ]
+  provisioner "local-exec" {
+    command = "gcloud functions call ${google_cloudfunctions_function.insert_firestore_doc.name} --region ${var.region}"
+  }
+
+  triggers = {
+    always_run = "${timestamp()}" # This will always execute the provisioner.
+  }
 }
 
 
 resource "null_resource" "destroy_database" {
   triggers = {
-    resource_name = "(default)"
     project_name  = var.project_name
+    database_name = google_firestore_database.database.name
   }
 
   provisioner "local-exec" {
     when    = destroy
-    command = "gcloud alpha firestore databases delete --database=${self.triggers.resource_name} --project=${self.triggers.project_name} --quiet"
+    command = "gcloud alpha firestore databases delete --database=${self.triggers.database_name} --project=${self.triggers.project_name} --quiet"
   }
 }
 
-resource "time_sleep" "wait_3_mins" {
+resource "time_sleep" "wait_for_it" {
   depends_on = [google_artifact_registry_repository.backend, data.http.dispatch_event_backend]
 
-  create_duration = "3m"
+  create_duration = "2m"
 }
 
 
@@ -262,7 +352,7 @@ resource "google_cloud_run_service" "api_service" {
   project = var.project_name
 
   depends_on = [
-    time_sleep.wait_3_mins,
+    time_sleep.wait_for_it,
     github_repository_file.backend_workflow,
     google_firestore_database.database,
     google_artifact_registry_repository.backend,
@@ -297,6 +387,10 @@ resource "google_cloud_run_service" "api_service" {
         env {
           name  = "COLLECTION_NAME"
           value = var.collection_name
+        }
+        env {
+          name  = "DATABASE_NAME"
+          value = google_firestore_database.database.name
         }
       }
       service_account_name = google_service_account.admin_sa.email
@@ -341,10 +435,15 @@ resource "google_storage_bucket_iam_member" "bucket_iam_member" {
 
 resource "google_storage_bucket_iam_member" "public_read" {
   bucket = google_storage_bucket.static_website_bucket.name
-  role   = "roles/storage.objectViewer"
+  role   = "roles/storage.legacyObjectReader"
   member = "allUsers"
 }
 
+# resource "google_storage_bucket_access_control" "public_rule" {
+#   bucket = google_storage_bucket.static_website_bucket.id
+#   role   = "READER"
+#   entity = "allUsers"
+# }
 
 resource "github_repository_file" "frontend_workflow" {
 
