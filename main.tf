@@ -1,8 +1,3 @@
-resource "random_pet" "project_id" {
-  length    = 2
-  separator = "-"
-}
-
 resource "google_project_service" "services" {
   project = var.project_name
   for_each = toset([
@@ -202,12 +197,9 @@ resource "google_project_iam_member" "secret_access" {
   member  = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
-resource "random_string" "document_id" {
-  length  = 20
-  special = false
-  upper   = true
-  lower   = true
-  numeric = true
+resource "random_pet" "project_id" {
+  length    = 2
+  separator = "-"
 }
 
 resource "google_firestore_database" "database" {
