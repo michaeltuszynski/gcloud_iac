@@ -498,6 +498,8 @@ resource "github_repository_file" "frontend_workflow" {
                 path: 'build'
                 destination: '${google_storage_bucket.static_website_bucket.name}'
                 parent: false
+                headers: |-
+                  cache-control: no-cache, no-store, max-age=0, must-revalidate
   EOF
 }
 
