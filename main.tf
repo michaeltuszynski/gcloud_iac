@@ -30,23 +30,20 @@ resource "google_service_account_key" "application_sa_key" {
   service_account_id = google_service_account.application_sa.name
 }
 
+resource "google_service_account_iam_binding" "sa_actas_binding" {
+  service_account_id = google_service_account.application_sa.name
+  role               = "roles/iam.serviceAccountUser"
+
+  members = [
+    "serviceAccount:${google_service_account.application_sa.email}"
+  ]
+}
+
 resource "google_artifact_registry_repository" "backend" {
   project       = var.project_name
   location      = var.region
   repository_id = var.repository_name_backend
   description   = "Backend repository"
-  format        = "DOCKER"
-
-  docker_config {
-    immutable_tags = false
-  }
-}
-
-resource "google_artifact_registry_repository" "frontend" {
-  project       = var.project_name
-  location      = var.region
-  repository_id = var.repository_name_frontend
-  description   = "Frontend repository"
   format        = "DOCKER"
 
   docker_config {
@@ -66,92 +63,26 @@ resource "google_project_iam_member" "artifact_registry_writer" {
   member  = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
-//for google cloud run deployments from github actions
-resource "google_service_account_iam_binding" "sa_actas_binding" {
-  service_account_id = google_service_account.application_sa.name
-  role               = "roles/iam.serviceAccountUser"
-
-  members = [
-    "serviceAccount:${google_service_account.application_sa.email}"
-  ]
-}
-
 resource "github_actions_secret" "deployment_secret_backend" {
   repository      = var.repository_name_backend
   secret_name     = "GCP_SA_KEY"
   plaintext_value = base64decode(google_service_account_key.application_sa_key.private_key)
 }
 
-resource "github_actions_secret" "deployment_secret_frontend" {
-  repository      = var.repository_name_frontend
-  secret_name     = "GCP_SA_KEY"
-  plaintext_value = base64decode(google_service_account_key.application_sa_key.private_key)
-}
-
 resource "github_repository_file" "backend_workflow" {
-
-  depends_on = [github_actions_secret.deployment_secret_backend, google_artifact_registry_repository.backend]
-
   overwrite_on_create = true
   repository          = var.repository_name_backend
   branch              = var.repository_branch_backend
-  file                = ".github/workflows/gcp-workflow.yml"
-  content             = <<-EOF
-    name: CI/CD Pipeline
+  file                = ".github/workflows/backend-gcp-workflow.yml"
+  content = templatefile("backend-github-workflow.yml", {
+    gcp_region       = var.region
+    gcp_branch       = var.repository_branch_backend
+    gcp_service      = "${var.prefix}-api"
+    gcp_repo_backend = var.repository_name_backend
+    gcp_image        = "${var.region}-docker.pkg.dev/${var.project_name}/${var.repository_name_backend}/${var.repository_name_backend}:latest"
+  })
 
-    on:
-      push:
-        branches:
-          - ${var.repository_branch_backend}
-
-
-    jobs:
-      push_to_registry:
-        name: Build Backend API
-        runs-on: ubuntu-latest
-
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v2
-
-            - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@v1
-
-            - name: Setup GCP Authentication
-              uses: google-github-actions/auth@v1
-              with:
-                credentials_json: $${{ secrets.GCP_SA_KEY }}
-
-            - name: Login to Artifact Registry
-              uses: docker/login-action@v1
-              with:
-                registry: ${var.region}-docker.pkg.dev
-                username: _json_key
-                password: $${{ secrets.GCP_SA_KEY }}
-
-            - name: Build and push Docker image
-              uses: docker/build-push-action@v2
-              with:
-                context: .
-                file: ./Dockerfile
-                push: true
-                tags: ${var.region}-docker.pkg.dev/${var.project_name}/${var.repository_name_backend}/${var.repository_name_backend}:latest
-            - name: Check if Cloud Run Service Exists
-              id: check_service
-              run: |
-                if gcloud run services describe ${var.prefix}-api --region=${var.region} --platform=managed; then
-                  echo "::set-output name=service_exists::true"
-                else
-                  echo "::set-output name=service_exists::false"
-                fi
-            - name: Deploy to Cloud Run
-              if: steps.check_service.outputs.service_exists == 'true'
-              uses: 'google-github-actions/deploy-cloudrun@v1'
-              with:
-                service: "${var.prefix}-api"
-                region: ${var.region}
-                image: ${var.region}-docker.pkg.dev/${var.project_name}/${var.repository_name_backend}/${var.repository_name_backend}:latest
-    EOF
+  depends_on = [github_actions_secret.deployment_secret_backend, google_artifact_registry_repository.backend]
 }
 
 data "http" "dispatch_event_backend" {
@@ -165,7 +96,7 @@ data "http" "dispatch_event_backend" {
   }
 
   request_body = jsonencode({
-    event_type = "start-my-workflow"
+    event_type = "start-backend-workflow"
   })
 
   depends_on = [github_repository_file.backend_workflow]
@@ -184,12 +115,6 @@ resource "google_secret_manager_secret_version" "individual_secret" {
   secret      = google_secret_manager_secret.this.id
   secret_data = base64decode(google_service_account_key.application_sa_key.private_key)
 }
-
-# resource "google_secret_manager_secret_iam_member" "secret_accessor" {
-#   secret_id = google_secret_manager_secret.this.id
-#   role      = "roles/secretmanager.secretAccessor"
-#   member    = "serviceAccount:${google_service_account.application_sa.email}"
-# }
 
 resource "google_project_iam_member" "secret_access" {
   project = var.project_name
@@ -306,7 +231,6 @@ resource "null_resource" "invoke_function" {
   }
 }
 
-
 resource "null_resource" "destroy_database" {
   triggers = {
     project_name  = var.project_name
@@ -331,7 +255,6 @@ resource "google_cloud_run_service" "api_service" {
 
   depends_on = [
     time_sleep.wait_for_it,
-    #null_resource.check_image,
     github_repository_file.backend_workflow,
     google_firestore_database.database,
     google_artifact_registry_repository.backend,
@@ -397,9 +320,6 @@ resource "google_cloud_run_service_iam_member" "public_access" {
   project  = var.project_name
 }
 
-
-
-
 resource "google_storage_bucket" "static_website_bucket" {
   name          = "${var.prefix}-static-website-bucket"
   location      = "US"
@@ -424,11 +344,23 @@ resource "google_storage_bucket_iam_member" "public_read" {
   member = "allUsers"
 }
 
-# resource "google_storage_bucket_access_control" "public_rule" {
-#   bucket = google_storage_bucket.static_website_bucket.id
-#   role   = "READER"
-#   entity = "allUsers"
-# }
+resource "google_artifact_registry_repository" "frontend" {
+  project       = var.project_name
+  location      = var.region
+  repository_id = var.repository_name_frontend
+  description   = "Frontend repository"
+  format        = "DOCKER"
+
+  docker_config {
+    immutable_tags = false
+  }
+}
+
+resource "github_actions_secret" "deployment_secret_frontend" {
+  repository      = var.repository_name_frontend
+  secret_name     = "GCP_SA_KEY"
+  plaintext_value = base64decode(google_service_account_key.application_sa_key.private_key)
+}
 
 resource "github_repository_file" "frontend_workflow" {
 
@@ -439,60 +371,15 @@ resource "github_repository_file" "frontend_workflow" {
     google_cloud_run_service.api_service
   ]
 
-
   overwrite_on_create = true
   repository          = var.repository_name_frontend
   branch              = var.repository_branch_frontend
-  file                = ".github/workflows/fe-workflow.yml"
-  content             = <<-EOF
-    name: CI/CD Pipeline
-
-    on:
-      push:
-        branches:
-          - ${var.repository_branch_frontend}
-
-
-    jobs:
-      push_to_gcp_bucket:
-        name: Build react website for GCP
-        runs-on: ubuntu-latest
-
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v3
-
-            - name: Set up Node.js
-              uses: actions/setup-node@v3
-              with:
-                node-version: '18'
-
-            - name: Install dependencies
-              run: yarn install
-
-            - name: Build
-              run: yarn build
-
-            - name: Create config.json
-              run: |
-                echo '{
-                  "REACT_APP_BACKEND_URL": "${replace(google_cloud_run_service.api_service.status[0].url, "https://", "")}"
-                }' > build/config.json
-
-            - name: Setup GCP Authentication
-              uses: google-github-actions/auth@v1
-              with:
-                credentials_json: $${{ secrets.GCP_SA_KEY }}
-
-            - name: Upload build folder to GCP bucket
-              uses: 'google-github-actions/upload-cloud-storage@v1'
-              with:
-                path: 'build'
-                destination: '${google_storage_bucket.static_website_bucket.name}'
-                parent: false
-                headers: |-
-                  cache-control: no-cache, no-store, max-age=0, must-revalidate
-  EOF
+  file                = ".github/workflows/frontend-gcp-workflow.yml"
+  content = templatefile("frontend-github-workflow.yml", {
+    gcp_branch        = var.repository_branch_frontend
+    gcp_backend_url   = replace(google_cloud_run_service.api_service.status[0].url, "https://", "")
+    gcp_bucket_name   = google_storage_bucket.static_website_bucket.name
+  })
 }
 
 data "http" "dispatch_event_frontend" {
@@ -506,7 +393,7 @@ data "http" "dispatch_event_frontend" {
   }
 
   request_body = jsonencode({
-    event_type = "start-my-workflow"
+    event_type = "start-frontend-workflow"
   })
 
   depends_on = [github_repository_file.frontend_workflow]
