@@ -51,11 +51,6 @@ variable "project_name" {
   type        = string
 }
 
-variable "project_id" {
-  description = "The ID of the project"
-  type        = string
-}
-
 variable "collection_name" {
   description = "The name of the collection"
   type        = string

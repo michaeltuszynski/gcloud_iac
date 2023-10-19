@@ -4,7 +4,7 @@ resource "random_pet" "project_id" {
 }
 
 resource "google_project_service" "services" {
-  project = var.project_id
+  project = var.project_name
   for_each = toset([
     "run.googleapis.com",
     "compute.googleapis.com",
@@ -28,7 +28,7 @@ resource "google_project_service" "services" {
 resource "google_service_account" "application_sa" {
   account_id   = "terraform"
   display_name = "created-sa-for-app"
-  project      = var.project_id
+  project      = var.project_name
 }
 
 resource "google_service_account_key" "application_sa_key" {
@@ -236,7 +236,7 @@ resource "google_cloudfunctions_function" "insert_firestore_doc" {
   service_account_email = google_service_account.application_sa.email
 
   environment_variables = {
-    PROJECT_ID      = var.project_id
+    PROJECT_ID      = var.project_name
     COLLECTION_NAME = var.collection_name
     DATABASE_NAME   = google_firestore_database.database.name,
     SECRET_NAME     = google_secret_manager_secret.this.secret_id,
@@ -361,7 +361,7 @@ resource "google_cloud_run_service" "api_service" {
         }
         env {
           name  = "PROJECT_ID"
-          value = var.project_id
+          value = var.project_name
         }
         env {
           name  = "SECRET_NAME"
