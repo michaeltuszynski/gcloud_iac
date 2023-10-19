@@ -46,11 +46,6 @@ variable "prefix" {
   default     = "todoapp"
 }
 
-variable "billing_account" {
-  description = "The billing account to use for the project"
-  type        = string
-}
-
 variable "project_name" {
   description = "The name of the project"
   type        = string
