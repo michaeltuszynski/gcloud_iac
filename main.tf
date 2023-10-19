@@ -3,7 +3,6 @@ resource "random_pet" "project_id" {
   separator = "-"
 }
 
-// Enable necessary services
 resource "google_project_service" "services" {
   project = var.project_id
   for_each = toset([
@@ -18,7 +17,6 @@ resource "google_project_service" "services" {
     "container.googleapis.com",
     "firestore.googleapis.com",
     "iam.googleapis.com",
-    "appengine.googleapis.com",
     "cloudfunctions.googleapis.com",
     "cloudbuild.googleapis.com",
   ])
@@ -27,20 +25,14 @@ resource "google_project_service" "services" {
   disable_on_destroy = false
 }
 
-resource "google_project_iam_member" "admin_sa_owner" {
-  project = var.project_id
-  role    = "roles/owner"
-  member  = "serviceAccount:${google_service_account.admin_sa.email}"
-}
-
-resource "google_service_account" "admin_sa" {
+resource "google_service_account" "application_sa" {
   account_id   = "terraform"
-  display_name = "created-sa-for-admin"
+  display_name = "created-sa-for-app"
   project      = var.project_id
 }
 
-resource "google_service_account_key" "admin_sa_key" {
-  service_account_id = google_service_account.admin_sa.name
+resource "google_service_account_key" "application_sa_key" {
+  service_account_id = google_service_account.application_sa.name
 }
 
 resource "google_artifact_registry_repository" "backend" {
@@ -70,25 +62,35 @@ resource "google_artifact_registry_repository" "frontend" {
 resource "google_project_iam_member" "artifact_registry_reader" {
   project = var.project_name
   role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${google_service_account.admin_sa.email}"
+  member  = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
 resource "google_project_iam_member" "artifact_registry_writer" {
   project = var.project_name
   role    = "roles/artifactregistry.writer"
-  member  = "serviceAccount:${google_service_account.admin_sa.email}"
+  member  = "serviceAccount:${google_service_account.application_sa.email}"
+}
+
+//for google cloud run deployments from github actions
+resource "google_service_account_iam_binding" "sa_actas_binding" {
+  service_account_id = google_service_account.application_sa.name
+  role               = "roles/iam.serviceAccountUser"
+
+  members = [
+    "serviceAccount:${google_service_account.application_sa.email}"
+  ]
 }
 
 resource "github_actions_secret" "deployment_secret_backend" {
   repository      = var.repository_name_backend
   secret_name     = "GCP_SA_KEY"
-  plaintext_value = base64decode(google_service_account_key.admin_sa_key.private_key)
+  plaintext_value = base64decode(google_service_account_key.application_sa_key.private_key)
 }
 
 resource "github_actions_secret" "deployment_secret_frontend" {
   repository      = var.repository_name_frontend
   secret_name     = "GCP_SA_KEY"
-  plaintext_value = base64decode(google_service_account_key.admin_sa_key.private_key)
+  plaintext_value = base64decode(google_service_account_key.application_sa_key.private_key)
 }
 
 resource "github_repository_file" "backend_workflow" {
@@ -139,7 +141,21 @@ resource "github_repository_file" "backend_workflow" {
                 file: ./Dockerfile
                 push: true
                 tags: ${var.region}-docker.pkg.dev/${var.project_name}/${var.repository_name_backend}/${var.repository_name_backend}:latest
-
+            - name: Check if Cloud Run Service Exists
+              id: check_service
+              run: |
+                if gcloud run services describe ${var.prefix}-api --region=${var.region} --platform=managed; then
+                  echo "::set-output name=service_exists::true"
+                else
+                  echo "::set-output name=service_exists::false"
+                fi
+            - name: Deploy to Cloud Run
+              if: steps.check_service.outputs.service_exists == 'true'
+              uses: 'google-github-actions/deploy-cloudrun@v1'
+              with:
+                service: "${var.prefix}-api"
+                region: ${var.region}
+                image: ${var.region}-docker.pkg.dev/${var.project_name}/${var.repository_name_backend}/${var.repository_name_backend}:latest
     EOF
 }
 
@@ -154,37 +170,12 @@ data "http" "dispatch_event_backend" {
   }
 
   request_body = jsonencode({
-    event_type = "my-event"
+    event_type = "start-my-workflow"
   })
 
   depends_on = [github_repository_file.backend_workflow]
 }
 
-# // Create a VPC
-# resource "google_compute_network" "vpc" {
-#   project                 = var.project_name
-#   name                    = "my-vpc"
-#   auto_create_subnetworks = false
-# }
-
-# // Create a public subnet
-# resource "google_compute_subnetwork" "public_subnet" {
-#   project       = var.project_name
-#   name          = "public-subnet"
-#   ip_cidr_range = "10.0.1.0/24"
-#   region        = var.region
-#   network       = google_compute_network.vpc.name
-# }
-
-# // Create a private subnet
-# resource "google_compute_subnetwork" "private_subnet" {
-#   project                  = var.project_name
-#   name                     = "private-subnet"
-#   ip_cidr_range            = "10.0.2.0/24"
-#   region                   = var.region
-#   network                  = google_compute_network.vpc.name
-#   private_ip_google_access = true
-# }
 
 resource "google_secret_manager_secret" "this" {
   project   = var.project_name
@@ -196,19 +187,19 @@ resource "google_secret_manager_secret" "this" {
 
 resource "google_secret_manager_secret_version" "individual_secret" {
   secret      = google_secret_manager_secret.this.id
-  secret_data = base64decode(google_service_account_key.admin_sa_key.private_key)
+  secret_data = base64decode(google_service_account_key.application_sa_key.private_key)
 }
 
-resource "google_secret_manager_secret_iam_member" "secret_accessor" {
-  secret_id = google_secret_manager_secret.this.id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.admin_sa.email}"
-}
+# resource "google_secret_manager_secret_iam_member" "secret_accessor" {
+#   secret_id = google_secret_manager_secret.this.id
+#   role      = "roles/secretmanager.secretAccessor"
+#   member    = "serviceAccount:${google_service_account.application_sa.email}"
+# }
 
 resource "google_project_iam_member" "secret_access" {
   project = var.project_name
   role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.admin_sa.email}"
+  member  = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
 resource "random_string" "document_id" {
@@ -226,14 +217,11 @@ resource "google_firestore_database" "database" {
   type        = "FIRESTORE_NATIVE"
 }
 
-# resource "google_firestore_document" "mydoc" {
-#   depends_on  = [google_firestore_database.database]
-#   database    = google_firestore_database.database.name
-#   project     = var.project_id
-#   collection  = var.collection_name
-#   document_id = random_string.document_id.result
-#   fields      = "{\"title\":{\"stringValue\":\"This is another task\"},\"completed\":{\"booleanValue\":true}}"
-# }
+resource "google_project_iam_member" "firestore_iam" {
+  project = var.project_name
+  role    = "roles/datastore.owner"
+  member  = "serviceAccount:${google_service_account.application_sa.email}"
+}
 
 resource "google_cloudfunctions_function" "insert_firestore_doc" {
   name                  = "insert-firestore-doc"
@@ -245,7 +233,7 @@ resource "google_cloudfunctions_function" "insert_firestore_doc" {
   runtime               = "python310"
   entry_point           = "main"
   project               = var.project_name
-  service_account_email = google_service_account.admin_sa.email
+  service_account_email = google_service_account.application_sa.email
 
   environment_variables = {
     PROJECT_ID      = var.project_id
@@ -258,24 +246,23 @@ resource "google_cloudfunctions_function" "insert_firestore_doc" {
 resource "google_project_iam_member" "function_invoker" {
   project = var.project_name
   role    = "roles/cloudfunctions.invoker"
-  member  = "serviceAccount:${google_service_account.admin_sa.email}"
+  member  = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "function_secret_access" {
   project   = var.project_name
   secret_id = google_secret_manager_secret.this.secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.admin_sa.email}"
+  member    = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
 resource "google_project_iam_binding" "cloud_function_firestore_writer" {
-  project   = var.project_name
-  role = "roles/datastore.user"
+  project = var.project_name
+  role    = "roles/datastore.user"
   members = [
-    "serviceAccount:${google_service_account.admin_sa.email}"
+    "serviceAccount:${google_service_account.application_sa.email}"
   ]
 }
-
 
 resource "google_storage_bucket" "bucket" {
   name          = "${var.prefix}-cloud-function-bucket"
@@ -343,9 +330,8 @@ resource "null_resource" "destroy_database" {
 resource "time_sleep" "wait_for_it" {
   depends_on = [google_artifact_registry_repository.backend, data.http.dispatch_event_backend]
 
-  create_duration = "2m"
+  create_duration = "3m"
 }
-
 
 // Deploy container to Cloud Run
 resource "google_cloud_run_service" "api_service" {
@@ -353,6 +339,7 @@ resource "google_cloud_run_service" "api_service" {
 
   depends_on = [
     time_sleep.wait_for_it,
+    #null_resource.check_image,
     github_repository_file.backend_workflow,
     google_firestore_database.database,
     google_artifact_registry_repository.backend,
@@ -393,7 +380,7 @@ resource "google_cloud_run_service" "api_service" {
           value = google_firestore_database.database.name
         }
       }
-      service_account_name = google_service_account.admin_sa.email
+      service_account_name = google_service_account.application_sa.email
     }
   }
 
@@ -401,6 +388,12 @@ resource "google_cloud_run_service" "api_service" {
     percent         = 100
     latest_revision = true
   }
+}
+
+resource "google_project_iam_member" "api_service_iam_member" {
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.application_sa.email}"
+  project = var.project_name
 }
 
 // IAM: Allow unauthenticated access to Cloud Run service
@@ -430,7 +423,7 @@ resource "google_storage_bucket" "static_website_bucket" {
 resource "google_storage_bucket_iam_member" "bucket_iam_member" {
   bucket = google_storage_bucket.static_website_bucket.name
   role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.admin_sa.email}"
+  member = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
 resource "google_storage_bucket_iam_member" "public_read" {
@@ -519,7 +512,7 @@ data "http" "dispatch_event_frontend" {
   }
 
   request_body = jsonencode({
-    event_type = "my-event"
+    event_type = "start-my-workflow"
   })
 
   depends_on = [github_repository_file.frontend_workflow]

@@ -2,3 +2,4 @@ requests
 google-auth
 google-auth-oauthlib
 google-cloud-secret-manager
+Flask<3.0,>=1.0
