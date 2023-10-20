@@ -102,7 +102,6 @@ data "http" "dispatch_event_backend" {
   depends_on = [github_repository_file.backend_workflow]
 }
 
-
 resource "google_secret_manager_secret" "this" {
   project   = var.project_name
   secret_id = "${var.prefix}-secret"
@@ -114,6 +113,13 @@ resource "google_secret_manager_secret" "this" {
 resource "google_secret_manager_secret_version" "individual_secret" {
   secret      = google_secret_manager_secret.this.id
   secret_data = base64decode(google_service_account_key.application_sa_key.private_key)
+}
+
+resource "google_secret_manager_secret_iam_member" "function_secret_access" {
+  project   = var.project_name
+  secret_id = google_secret_manager_secret.this.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
 resource "google_project_iam_member" "secret_access" {
@@ -164,13 +170,6 @@ resource "google_project_iam_member" "function_invoker" {
   project = var.project_name
   role    = "roles/cloudfunctions.invoker"
   member  = "serviceAccount:${google_service_account.application_sa.email}"
-}
-
-resource "google_secret_manager_secret_iam_member" "function_secret_access" {
-  project   = var.project_name
-  secret_id = google_secret_manager_secret.this.secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.application_sa.email}"
 }
 
 resource "google_project_iam_binding" "cloud_function_firestore_writer" {
@@ -243,11 +242,7 @@ resource "null_resource" "destroy_database" {
   }
 }
 
-resource "time_sleep" "wait_for_it" {
-  depends_on = [google_artifact_registry_repository.backend, data.http.dispatch_event_backend]
 
-  create_duration = "3m"
-}
 
 // Deploy container to Cloud Run
 resource "google_cloud_run_service" "api_service" {
@@ -318,6 +313,12 @@ resource "google_cloud_run_service_iam_member" "public_access" {
   role     = "roles/run.invoker"
   member   = "allUsers"
   project  = var.project_name
+}
+
+resource "time_sleep" "wait_for_it" {
+  depends_on = [google_artifact_registry_repository.backend, data.http.dispatch_event_backend]
+
+  create_duration = "3m"
 }
 
 resource "google_storage_bucket" "static_website_bucket" {
