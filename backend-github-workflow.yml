@@ -1,0 +1,54 @@
+name: Backend CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - ${gcp_branch}
+
+jobs:
+  push_to_registry:
+    name: Build Backend API
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Setup GCP Authentication
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: $${{ secrets.GCP_SA_KEY }}
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${gcp_region}-docker.pkg.dev
+          username: _json_key
+          password: $${{ secrets.GCP_SA_KEY }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${gcp_image}
+      - name: Check if Cloud Run Service Exists
+        id: check_service
+        run: |
+          if gcloud run services describe ${gcp_service} --region=${gcp_region} --platform=managed; then
+            echo "service_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "service_exists=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Deploy to Cloud Run
+        if: steps.check_service.outputs.service_exists == 'true'
+        uses: 'google-github-actions/deploy-cloudrun@v1'
+        with:
+          service: ${gcp_service}
+          region: ${gcp_region}
+          image: ${gcp_image}
+
